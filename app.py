@@ -136,7 +136,7 @@ def process_video_translation(video_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-    # 3. Penerjemahan dengan Gemini API
+    # 3. Penerjemahan dengan Gemini API (Menggunakan gemini-3.6-flash)
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
     full_text_to_translate = "\n".join([f"[{i}] {seg['text'].strip()}" for i, seg in enumerate(all_segments)])
@@ -148,9 +148,8 @@ Kalimat:
 {full_text_to_translate}
 """
     
-    # Menggunakan gemini-2.0-flash yang aktif dan stabil
     response = client_gemini.models.generate_content(
-        model='gemini-2.0-flash',
+        model='gemini-3.6-flash',
         contents=prompt
     )
     
