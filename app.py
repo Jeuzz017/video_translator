@@ -4,9 +4,9 @@ import tempfile
 import subprocess
 import json
 import time
+import re
 from groq import Groq
 from google import genai
-from google.genai import types
 import srt
 from datetime import timedelta
 
@@ -90,20 +90,19 @@ def transcribe_audio_file(client_groq, audio_file_path):
             
     return segments_dict_list
 
-def translate_batch_json(client_gemini, batch_items, target_lang):
-    """Meminta Gemini mengembalikan hasil terjemahan dalam format JSON murni"""
+def translate_batch(client_gemini, text_batch, target_lang):
+    """Penerjemahan per-batch dengan instruksi super ketat"""
     prompt = f"""You are a professional translator. 
-Translate the 'text' field of each item in the JSON array below into {target_lang}.
+Translate the following lines into {target_lang}.
 
-Input JSON:
-{json.dumps(batch_items, ensure_ascii=False)}
+RULES:
+1. Keep the exact index prefix [x] at the beginning of each translated line.
+2. Translate ONLY the text after [x].
+3. Do NOT skip any lines, do NOT summarize, and do NOT add extra comments.
 
-IMPORTANT:
-- Return ONLY a valid JSON array containing objects with keys "id" and "translated_text".
-- Keep the exact same "id" for each corresponding item.
-- Do not add Markdown codeblock formatting like ```json or any explanations.
+Input:
+{text_batch}
 """
-
     models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash']
     
     for model_name in models_to_try:
@@ -111,14 +110,10 @@ IMPORTANT:
             try:
                 response = client_gemini.models.generate_content(
                     model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    )
+                    contents=prompt
                 )
                 if response and response.text:
-                    parsed_json = json.loads(response.text)
-                    return parsed_json
+                    return response.text
             except Exception as e:
                 err_str = str(e)
                 if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str:
@@ -129,7 +124,7 @@ IMPORTANT:
                 else:
                     time.sleep(1)
                     continue
-    return []
+    return ""
 
 def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
@@ -179,8 +174,98 @@ def process_video_translation(video_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-    # 3. Penerjemahan dengan Gemini API (Structured JSON Batching)
+    # 3. Penerjemahan dengan Gemini API (Bertahap)
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
     translated_dict = {}
-    batch_size = 40
+    batch_size = 80  # Menerjemahkan 80 baris per request
+    
+    total_segments = len(all_segments)
+    progress_bar = st.progress(0)
+    
+    for start_idx in range(0, total_segments, batch_size):
+        end_idx = min(start_idx + batch_size, total_segments)
+        batch_segments = all_segments[start_idx:end_idx]
+        
+        text_batch = "\n".join([f"[{start_idx + i}] {seg['text'].strip()}" for i, seg in enumerate(batch_segments)])
+        
+        translated_raw = translate_batch(client_gemini, text_batch, target_language)
+        
+        # Robust Parsing menggunakan Regular Expressions
+        translated_lines = translated_raw.strip().split("\n")
+        for line in translated_lines:
+            line = line.strip()
+            # Cocokkan angka di dalam kurung siku [0] atau format penomoran serupa
+            match = re.match(r"^\[?(\d+)\]?[\.\:\-]?\s*(.*)", line)
+            if match:
+                try:
+                    idx = int(match.group(1))
+                    text = match.group(2).strip()
+                    if text:  # Jika ada isi terjemahan
+                        translated_dict[idx] = text
+                except:
+                    continue
+        
+        progress = min(1.0, end_idx / total_segments)
+        progress_bar.progress(progress)
+        time.sleep(0.5)
+
+    # 4. Buat File SRT Subtitle
+    srt_subtitles = []
+    for i, seg in enumerate(all_segments):
+        start_td = timedelta(seconds=seg["start"])
+        end_td = timedelta(seconds=seg["end"])
+        
+        # Prioritaskan hasil terjemahan dari dict
+        text = translated_dict.get(i, seg["text"].strip())
+        
+        srt_subtitles.append(
+            srt.Subtitle(index=i+1, start=start_td, end=end_td, content=text)
+        )
+    
+    srt_output = srt.compose(srt_subtitles)
+
+    return srt_output, all_segments, translated_dict
+
+if uploaded_file is not None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        temp_video_path = tmp_file.name
+
+    st.video(uploaded_file)
+
+    if st.button("🚀 Mulai Terjemahkan Video", type="primary"):
+        if not groq_api_key or not gemini_api_key:
+            st.error("Silakan masukkan Groq API Key dan Gemini API Key terlebih dahulu!")
+        else:
+            with st.spinner("Sedang memproses... Harap tunggu sebentar."):
+                try:
+                    srt_content, original_segments, translated_dict = process_video_translation(temp_video_path)
+                    st.success("✅ Proses Terjemahan Selesai!")
+
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("📥 Download Subtitle (.srt)")
+                        st.download_button(
+                            label="Download File .SRT",
+                            data=srt_content,
+                            file_name=f"translated_{target_language}.srt",
+                            mime="text/plain"
+                        )
+                    
+                    with col2:
+                        st.subheader("📜 Hasil Transkrip & Terjemahan")
+                        for i, seg in enumerate(original_segments):
+                            orig = seg["text"].strip()
+                            trans = translated_dict.get(i, "-")
+                            st.markdown(f"**[{seg['start']:.1f}s - {seg['end']:.1f}s]**")
+                            st.markdown(f"- 🗣️ *Original:* {orig}")
+                            st.markdown(f"- 🌐 *Terjemahan:* {trans}")
+                            st.divider()
+
+                except Exception as e:
+                    st.error(f"Terjadi kesalahan: {str(e)}")
+            
+            if os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
