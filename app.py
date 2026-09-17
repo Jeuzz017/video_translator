@@ -3,6 +3,7 @@ import os
 import tempfile
 import subprocess
 import json
+import time
 from groq import Groq
 from google import genai
 import srt
@@ -88,6 +89,31 @@ def transcribe_audio_file(client_groq, audio_file_path):
             
     return segments_dict_list
 
+def generate_translation_with_retry(client_gemini, prompt):
+    """Fungsi penerjemahan dengan Retry & Fallback Model otomatis"""
+    # Daftar model cadangan jika model utama sibuk
+    candidate_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+    
+    for model_name in candidate_models:
+        for attempt in range(3):  # Coba hingga 3x per model jika error 503
+            try:
+                response = client_gemini.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                return response.text
+            except Exception as e:
+                err_msg = str(e)
+                if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
+                    time.sleep(3 * (attempt + 1))  # Tunggu beberapa detik sebelum mencoba lagi
+                    continue
+                elif "404" in err_msg or "NOT_FOUND" in err_msg:
+                    break  # Jika model tidak ditemukan, langsung coba model berikutnya
+                else:
+                    raise e
+                    
+    raise Exception("Gagal terhubung ke server Gemini (semua model cadangan sedang sibuk/tidak tersedia). Silakan coba lagi beberapa saat lagi.")
+
 def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
     client_gemini = genai.Client(api_key=gemini_api_key)
@@ -136,7 +162,7 @@ def process_video_translation(video_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-    # 3. Penerjemahan dengan Gemini API (Menggunakan gemini-3.6-flash)
+    # 3. Penerjemahan dengan Gemini API (dengan Retry & Fallback)
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
     full_text_to_translate = "\n".join([f"[{i}] {seg['text'].strip()}" for i, seg in enumerate(all_segments)])
@@ -148,12 +174,9 @@ Kalimat:
 {full_text_to_translate}
 """
     
-    response = client_gemini.models.generate_content(
-        model='gemini-3.6-flash',
-        contents=prompt
-    )
+    translated_raw_text = generate_translation_with_retry(client_gemini, prompt)
     
-    translated_lines = response.text.strip().split("\n")
+    translated_lines = translated_raw_text.strip().split("\n")
     translated_dict = {}
     for line in translated_lines:
         if line.startswith("[") and "]" in line:
