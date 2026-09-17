@@ -179,14 +179,8 @@ def process_video_translation(video_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-    # 3. Penerjemahan dengan Gemini API (Menggunakan Structured JSON Batching)
+    # 3. Penerjemahan dengan Gemini API (Structured JSON Batching)
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
     translated_dict = {}
-    batch_size = 40  # 40 kalimat per batch JSON agar respon sangat akurat
-    
-    total_segments = len(all_segments)
-    progress_bar = st.progress(0)
-    
-    for start_idx in range(0, total_segments, batch_size):
-        end_idx = min(start_idx +
+    batch_size = 40
