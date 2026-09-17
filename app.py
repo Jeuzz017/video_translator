@@ -34,15 +34,30 @@ def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
     client_gemini = genai.Client(api_key=gemini_api_key)
 
-    # 1. Ekstraksi Audio
-    st.info("🎵 1/3: Memisahkan audio dari video...")
+    # 1. Ekstraksi & Kompresi Audio (Mono, Bitrate 64k agar ukuran file sangat kecil)
+    st.info("🎵 1/3: Memisahkan & mengompres audio dari video...")
     audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
+    
     clip = VideoFileClip(video_path)
-    clip.audio.write_audiofile(audio_path, logger=None)
+    # Menggunakan bitrate 64k dan mono channel agar muat di limit 25MB Groq
+    clip.audio.write_audiofile(
+        audio_path, 
+        bitrate="64k", 
+        fps=16000, 
+        nchannels=1, 
+        logger=None
+    )
     clip.close()
 
     # 2. Transkripsi dengan Groq Whisper
     st.info("🎙️ 2/3: Mentranskripsi suara (Speech-to-Text)...")
+    
+    file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    
+    # Jika ukuran masih > 24MB, peringatkan atau proses per chunk
+    if file_size_mb > 24:
+        st.warning(f"Ukuran audio terkompresi ({file_size_mb:.1f} MB) masih mendekati batas. Memproses transkripsi...")
+
     with open(audio_path, "rb") as audio_file:
         transcription = client_groq.audio.transcriptions.create(
             file=(audio_path, audio_file.read()),
@@ -55,7 +70,6 @@ def process_video_translation(video_path):
     # 3. Penerjemahan dengan Gemini API
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
-    # PERBAIKAN: Menggunakan seg.text (bukan seg['text'])
     full_text_to_translate = "\n".join([f"[{i}] {seg.text.strip()}" for i, seg in enumerate(segments)])
     
     prompt = f"""Kamu adalah penerjemah profesional. Terjemahkan kalimat-kalimat berikut ke dalam bahasa {target_language}.
@@ -78,7 +92,6 @@ Kalimat:
             try:
                 idx_str, text = line.split("]", 1)
                 idx = int(idx_str.replace("[", "").strip())
-                # Clean up titik atau spasi di awal kalimat terjemahan jika ada
                 clean_text = text.strip().lstrip(". ").strip()
                 translated_dict[idx] = clean_text
             except:
@@ -87,7 +100,6 @@ Kalimat:
     # 4. Buat File SRT Subtitle
     srt_subtitles = []
     for i, seg in enumerate(segments):
-        # PERBAIKAN: Menggunakan seg.start, seg.end, dan seg.text
         start_time = timedelta(seconds=seg.start)
         end_time = timedelta(seconds=seg.end)
         text = translated_dict.get(i, seg.text.strip())
