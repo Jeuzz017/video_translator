@@ -89,30 +89,37 @@ def transcribe_audio_file(client_groq, audio_file_path):
             
     return segments_dict_list
 
-def generate_translation_with_retry(client_gemini, prompt):
-    """Fungsi penerjemahan dengan Retry & Fallback Model otomatis"""
-    # Daftar model cadangan jika model utama sibuk
-    candidate_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+def translate_batch(client_gemini, text_batch, target_lang):
+    """Penerjemahan per-batch dengan penanganan retry"""
+    prompt = f"""Kamu adalah penerjemah profesional. Terjemahkan kalimat-kalimat berikut ke dalam bahasa {target_lang}.
+Sangat penting: Jaga format penomoran [x] di awal setiap baris agar persis sama dengan aslinya! Jangan tambahkan penjelasan lain.
+
+Kalimat:
+{text_batch}
+"""
+    # Mencoba model gemini-2.5-flash terlebih dahulu, lalu gemini-1.5-flash jika bermasalah
+    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash']
     
-    for model_name in candidate_models:
-        for attempt in range(3):  # Coba hingga 3x per model jika error 503
+    for model_name in models_to_try:
+        for attempt in range(3):
             try:
                 response = client_gemini.models.generate_content(
                     model=model_name,
                     contents=prompt
                 )
-                return response.text
+                if response and response.text:
+                    return response.text
             except Exception as e:
-                err_msg = str(e)
-                if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
-                    time.sleep(3 * (attempt + 1))  # Tunggu beberapa detik sebelum mencoba lagi
+                err_str = str(e)
+                if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str:
+                    time.sleep(2 * (attempt + 1))
                     continue
-                elif "404" in err_msg or "NOT_FOUND" in err_msg:
-                    break  # Jika model tidak ditemukan, langsung coba model berikutnya
+                elif "404" in err_str or "NOT_FOUND" in err_str:
+                    break
                 else:
-                    raise e
-                    
-    raise Exception("Gagal terhubung ke server Gemini (semua model cadangan sedang sibuk/tidak tersedia). Silakan coba lagi beberapa saat lagi.")
+                    time.sleep(1)
+                    continue
+    return ""
 
 def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
@@ -162,31 +169,38 @@ def process_video_translation(video_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-    # 3. Penerjemahan dengan Gemini API (dengan Retry & Fallback)
+    # 3. Penerjemahan dengan Gemini API (Bertahap / Batching)
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
-    full_text_to_translate = "\n".join([f"[{i}] {seg['text'].strip()}" for i, seg in enumerate(all_segments)])
-    
-    prompt = f"""Kamu adalah penerjemah profesional. Terjemahkan kalimat-kalimat berikut ke dalam bahasa {target_language}.
-Jaga format penomoran [x] di awal setiap baris agar sesuai dengan kalimat aslinya! Jangan ubah nomor atau menambah penjelasan lain.
-
-Kalimat:
-{full_text_to_translate}
-"""
-    
-    translated_raw_text = generate_translation_with_retry(client_gemini, prompt)
-    
-    translated_lines = translated_raw_text.strip().split("\n")
     translated_dict = {}
-    for line in translated_lines:
-        if line.startswith("[") and "]" in line:
-            try:
-                idx_str, text = line.split("]", 1)
-                idx = int(idx_str.replace("[", "").strip())
-                clean_text = text.strip().lstrip(". ").strip()
-                translated_dict[idx] = clean_text
-            except:
-                continue
+    batch_size = 50  # Menerjemahkan 50 baris per request
+    
+    total_segments = len(all_segments)
+    progress_bar = st.progress(0)
+    
+    for start_idx in range(0, total_segments, batch_size):
+        end_idx = min(start_idx + batch_size, total_segments)
+        batch_segments = all_segments[start_idx:end_idx]
+        
+        text_batch = "\n".join([f"[{start_idx + i}] {seg['text'].strip()}" for i, seg in enumerate(batch_segments)])
+        
+        translated_raw = translate_batch(client_gemini, text_batch, target_language)
+        
+        # Parsing hasil terjemahan batch
+        translated_lines = translated_raw.strip().split("\n")
+        for line in translated_lines:
+            if line.startswith("[") and "]" in line:
+                try:
+                    idx_str, text = line.split("]", 1)
+                    idx = int(idx_str.replace("[", "").strip())
+                    clean_text = text.strip().lstrip(". ").strip()
+                    translated_dict[idx] = clean_text
+                except:
+                    continue
+        
+        progress = min(1.0, end_idx / total_segments)
+        progress_bar.progress(progress)
+        time.sleep(0.5)  # Jeda aman antar batch
 
     # 4. Buat File SRT Subtitle
     srt_subtitles = []
