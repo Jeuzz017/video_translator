@@ -148,9 +148,9 @@ Kalimat:
 {full_text_to_translate}
 """
     
-    # Menggunakan model gemini-1.5-flash
+    # Menggunakan gemini-2.0-flash yang aktif dan stabil
     response = client_gemini.models.generate_content(
-        model='gemini-1.5-flash',
+        model='gemini-2.0-flash',
         contents=prompt
     )
     
