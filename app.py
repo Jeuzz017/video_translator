@@ -44,7 +44,7 @@ def get_video_duration(video_path):
         return 0.0
 
 def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
-    """Memotong & mengekstrak audio langsung dengan FFmpeg CLI (Fast & Lightweight)"""
+    """Memotong & mengekstrak audio langsung dengan FFmpeg CLI"""
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
@@ -112,7 +112,6 @@ def process_video_translation(video_path):
             
             chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
             
-            # Potong audio langsung pakai FFmpeg
             extract_audio_chunk(video_path, chunk_audio_path, start_time, current_duration)
             
             segments = transcribe_audio_file(client_groq, chunk_audio_path)
@@ -149,8 +148,9 @@ Kalimat:
 {full_text_to_translate}
 """
     
+    # Menggunakan model gemini-1.5-flash
     response = client_gemini.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-1.5-flash',
         contents=prompt
     )
     
