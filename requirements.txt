@@ -3,3 +3,4 @@ groq
 google-genai
 moviepy>=2.0.0
 srt
+pydub
