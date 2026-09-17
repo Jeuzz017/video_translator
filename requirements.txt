@@ -1,5 +1,5 @@
 streamlit
 groq
 google-genai
-moviepy
+moviepy>=2.0.0
 srt
