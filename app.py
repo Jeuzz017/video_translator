@@ -15,8 +15,13 @@ st.caption("Unggah video, transkrip percakapan, dan terjemahkan secara otomatis!
 
 # Sidebar Config
 st.sidebar.header("🔑 API Configurations")
-groq_api_key = st.sidebar.text_input("Groq API Key", type="password", help="Dapatkan gratis di console.groq.com")
-gemini_api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Dapatkan gratis di aistudio.google.com")
+
+# Membaca dari Streamlit Secrets jika ada, jika tidak ada baru membaca dari sidebar
+default_groq = st.secrets.get("GROQ_API_KEY", "")
+default_gemini = st.secrets.get("GEMINI_API_KEY", "")
+
+groq_api_key = st.sidebar.text_input("Groq API Key", value=default_groq, type="password", help="Dapatkan gratis di console.groq.com")
+gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_gemini, type="password", help="Dapatkan gratis di aistudio.google.com")
 
 target_language = st.sidebar.selectbox(
     "Pilih Bahasa Target Terjemahan:",
@@ -33,10 +38,10 @@ def process_video_translation(video_path):
     st.info("🎵 1/3: Memisahkan audio dari video...")
     audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
     clip = VideoFileClip(video_path)
-    clip.audio.write_audiofile(audio_path, verbose=False, logger=None)
+    clip.audio.write_audiofile(audio_path, logger=None)
     clip.close()
 
-    # 2. Transkripsi dengan Groq Whisper (Sangat cepat)
+    # 2. Transkripsi dengan Groq Whisper
     st.info("🎙️ 2/3: Mentranskripsi suara (Speech-to-Text)...")
     with open(audio_path, "rb") as audio_file:
         transcription = client_groq.audio.transcriptions.create(
@@ -50,11 +55,11 @@ def process_video_translation(video_path):
     # 3. Penerjemahan dengan Gemini API
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
-    # Kumpulkan teks untuk diterjemahkan dalam 1 request agar konteks terjaga
-    full_text_to_translate = "\n".join([f"[{i}] {seg['text'].strip()}" for i, seg in enumerate(segments)])
+    # PERBAIKAN: Menggunakan seg.text (bukan seg['text'])
+    full_text_to_translate = "\n".join([f"[{i}] {seg.text.strip()}" for i, seg in enumerate(segments)])
     
     prompt = f"""Kamu adalah penerjemah profesional. Terjemahkan kalimat-kalimat berikut ke dalam bahasa {target_language}.
-Jaga format penomoran [x] agar sesuai dengan kalimat aslinya! Jangan tambahkan penjelasan lain.
+Jaga format penomoran [x] di awal setiap baris agar sesuai dengan kalimat aslinya! Jangan ubah nomor atau menambah penjelasan lain.
 
 Kalimat:
 {full_text_to_translate}
@@ -73,17 +78,19 @@ Kalimat:
             try:
                 idx_str, text = line.split("]", 1)
                 idx = int(idx_str.replace("[", "").strip())
-                translated_dict[idx] = text.strip()
+                # Clean up titik atau spasi di awal kalimat terjemahan jika ada
+                clean_text = text.strip().lstrip(". ").strip()
+                translated_dict[idx] = clean_text
             except:
                 continue
 
     # 4. Buat File SRT Subtitle
     srt_subtitles = []
     for i, seg in enumerate(segments):
-        start_time = timedelta(seconds=seg['start'])
-        end_time = timedelta(seconds=seg['end'])
-        # Ambil terjemahan jika ada, kalau tidak gunakan teks asli
-        text = translated_dict.get(i, seg['text'].strip())
+        # PERBAIKAN: Menggunakan seg.start, seg.end, dan seg.text
+        start_time = timedelta(seconds=seg.start)
+        end_time = timedelta(seconds=seg.end)
+        text = translated_dict.get(i, seg.text.strip())
         
         srt_subtitles.append(
             srt.Subtitle(index=i+1, start=start_time, end=end_time, content=text)
@@ -107,7 +114,7 @@ if uploaded_file is not None:
 
     if st.button("🚀 Mulai Terjemahkan Video", type="primary"):
         if not groq_api_key or not gemini_api_key:
-            st.error("Silakan masukkan Groq API Key dan Gemini API Key di sidebar terlebih dahulu!")
+            st.error("Silakan masukkan Groq API Key dan Gemini API Key terlebih dahulu!")
         else:
             with st.spinner("Sedang memproses... Harap tunggu sebentar."):
                 try:
@@ -129,9 +136,10 @@ if uploaded_file is not None:
                     with col2:
                         st.subheader("📜 Hasil Transkrip & Terjemahan")
                         for i, seg in enumerate(original_segments):
-                            orig = seg['text'].strip()
+                            # PERBAIKAN: Menggunakan seg.text, seg.start, seg.end
+                            orig = seg.text.strip()
                             trans = translated_dict.get(i, "-")
-                            st.markdown(f"**[{seg['start']:.1f}s - {seg['end']:.1f}s]**")
+                            st.markdown(f"**[{seg.start:.1f}s - {seg.end:.1f}s]**")
                             st.markdown(f"- 🗣️ *Original:* {orig}")
                             st.markdown(f"- 🌐 *Terjemahan:* {trans}")
                             st.divider()
