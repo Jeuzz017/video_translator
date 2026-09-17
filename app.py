@@ -37,7 +37,27 @@ def transcribe_audio_file(client_groq, audio_file_path):
             model="whisper-large-v3",
             response_format="verbose_json"
         )
-    return transcription.segments
+    # Jika response berupa objek pydantic/dataclass, ubah ke dict agar konsisten
+    if hasattr(transcription, "segments"):
+        raw_segments = transcription.segments
+    elif isinstance(transcription, dict):
+        raw_segments = transcription.get("segments", [])
+    else:
+        raw_segments = getattr(transcription, "segments", [])
+
+    # Konversi setiap segmen ke dictionary murni
+    segments_dict_list = []
+    for s in raw_segments:
+        if isinstance(s, dict):
+            segments_dict_list.append(s)
+        else:
+            segments_dict_list.append({
+                "start": getattr(s, "start", 0.0),
+                "end": getattr(s, "end", 0.0),
+                "text": getattr(s, "text", "")
+            })
+            
+    return segments_dict_list
 
 def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
@@ -48,8 +68,7 @@ def process_video_translation(video_path):
     video_clip = VideoFileClip(video_path)
     duration_seconds = video_clip.duration
     
-    # Potong per 10 menit (600 detik) agar ukuran file audio selalu di bawah batas 25MB Groq
-    chunk_duration = 600 
+    chunk_duration = 600  # 10 menit per bagian
     all_segments = []
 
     st.info("🎙️ 2/3: Mentranskripsi suara (Speech-to-Text)...")
@@ -66,28 +85,26 @@ def process_video_translation(video_path):
             
             chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
             
-            # Ekstrak audio potongan menggunakan subclipped() [MoviePy v2+]
             sub_clip = video_clip.subclipped(start_time, end_time)
             sub_clip.audio.write_audiofile(chunk_audio_path, bitrate="64k", logger=None)
             sub_clip.close()
             
-            # Transkripsi chunk
             segments = transcribe_audio_file(client_groq, chunk_audio_path)
             
             # Sesuaikan timestamp dengan offset durasi
             for seg in segments:
-                seg.start += start_time
-                seg.end += start_time
-                all_segments.append(seg)
+                all_segments.append({
+                    "start": seg["start"] + start_time,
+                    "end": seg["end"] + start_time,
+                    "text": seg["text"]
+                })
                 
-            # Hapus audio temporary chunk
             if os.path.exists(chunk_audio_path):
                 os.remove(chunk_audio_path)
                 
             start_time += chunk_duration
             chunk_idx += 1
     else:
-        # Untuk video pendek, ekstrak audio langsung
         audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
         video_clip.audio.write_audiofile(audio_path, bitrate="64k", logger=None)
         all_segments = transcribe_audio_file(client_groq, audio_path)
@@ -100,7 +117,7 @@ def process_video_translation(video_path):
     # 3. Penerjemahan dengan Gemini API
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
-    full_text_to_translate = "\n".join([f"[{i}] {seg.text.strip()}" for i, seg in enumerate(all_segments)])
+    full_text_to_translate = "\n".join([f"[{i}] {seg['text'].strip()}" for i, seg in enumerate(all_segments)])
     
     prompt = f"""Kamu adalah penerjemah profesional. Terjemahkan kalimat-kalimat berikut ke dalam bahasa {target_language}.
 Jaga format penomoran [x] di awal setiap baris agar sesuai dengan kalimat aslinya! Jangan ubah nomor atau menambah penjelasan lain.
@@ -114,7 +131,6 @@ Kalimat:
         contents=prompt
     )
     
-    # Parse hasil terjemahan
     translated_lines = response.text.strip().split("\n")
     translated_dict = {}
     for line in translated_lines:
@@ -130,9 +146,9 @@ Kalimat:
     # 4. Buat File SRT Subtitle
     srt_subtitles = []
     for i, seg in enumerate(all_segments):
-        start_td = timedelta(seconds=seg.start)
-        end_td = timedelta(seconds=seg.end)
-        text = translated_dict.get(i, seg.text.strip())
+        start_td = timedelta(seconds=seg["start"])
+        end_td = timedelta(seconds=seg["end"])
+        text = translated_dict.get(i, seg["text"].strip())
         
         srt_subtitles.append(
             srt.Subtitle(index=i+1, start=start_td, end=end_td, content=text)
@@ -143,7 +159,6 @@ Kalimat:
     return srt_output, all_segments, translated_dict
 
 if uploaded_file is not None:
-    # Simpan sementara video yang diupload
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
         tmp_file.write(uploaded_file.read())
         temp_video_path = tmp_file.name
@@ -159,7 +174,6 @@ if uploaded_file is not None:
                     srt_content, original_segments, translated_dict = process_video_translation(temp_video_path)
                     st.success("✅ Proses Terjemahan Selesai!")
 
-                    # Kolom Download & Preview
                     col1, col2 = st.columns(2)
                     
                     with col1:
@@ -174,9 +188,9 @@ if uploaded_file is not None:
                     with col2:
                         st.subheader("📜 Hasil Transkrip & Terjemahan")
                         for i, seg in enumerate(original_segments):
-                            orig = seg.text.strip()
+                            orig = seg["text"].strip()
                             trans = translated_dict.get(i, "-")
-                            st.markdown(f"**[{seg.start:.1f}s - {seg.end:.1f}s]**")
+                            st.markdown(f"**[{seg['start']:.1f}s - {seg['end']:.1f}s]**")
                             st.markdown(f"- 🗣️ *Original:* {orig}")
                             st.markdown(f"- 🌐 *Terjemahan:* {trans}")
                             st.divider()
@@ -184,6 +198,5 @@ if uploaded_file is not None:
                 except Exception as e:
                     st.error(f"Terjadi kesalahan: {str(e)}")
             
-            # Hapus file temporary video
             if os.path.exists(temp_video_path):
                 os.remove(temp_video_path)
