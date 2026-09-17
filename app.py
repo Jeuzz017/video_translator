@@ -7,7 +7,6 @@ from google import genai
 from google.genai import types
 import srt
 from datetime import timedelta
-from pydub import AudioSegment
 
 st.set_page_config(page_title="Video Translator AI", layout="wide", page_icon="🎬")
 
@@ -44,57 +43,59 @@ def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
     client_gemini = genai.Client(api_key=gemini_api_key)
 
-    # 1. Ekstraksi Audio dari Video
-    st.info("🎵 1/3: Memisahkan & mengompres audio dari video...")
-    audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
+    st.info("🎵 1/3: Memisahkan & memeriksa durasi video...")
     
-    clip = VideoFileClip(video_path)
-    clip.audio.write_audiofile(
-        audio_path, 
-        bitrate="64k", 
-        logger=None
-    )
-    clip.close()
-
-    # 2. Transkripsi dengan Groq Whisper (Auto-Chunking jika > 20 MB)
-    st.info("🎙️ 2/3: Mentranskripsi suara (Speech-to-Text)...")
+    video_clip = VideoFileClip(video_path)
+    duration_seconds = video_clip.duration
     
-    file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    # Potong per 10 menit (600 detik) agar ukuran file audio selalu di bawah batas 25MB Groq
+    chunk_duration = 600 
     all_segments = []
 
-    if file_size_mb > 20:
-        st.warning(f"Ukuran audio ({file_size_mb:.1f} MB) melebihi batas 20 MB. Memotong audio menjadi beberapa bagian...")
+    st.info("🎙️ 2/3: Mentranskripsi suara (Speech-to-Text)...")
+
+    if duration_seconds > chunk_duration:
+        st.warning(f"Video berdurasi panjang ({duration_seconds/60:.1f} menit). Memproses audio dalam beberapa bagian...")
         
-        # Load audio dengan pydub
-        sound = AudioSegment.from_file(audio_path)
-        # Potong per 10 menit (600,000 ms)
-        chunk_length_ms = 10 * 60 * 1000
-        chunks = [sound[i:i + chunk_length_ms] for i in range(0, len(sound), chunk_length_ms)]
+        start_time = 0
+        chunk_idx = 1
         
-        time_offset = 0.0  # Waktu offset dalam detik untuk penyesuaian timestamp
-        
-        for idx, chunk in enumerate(chunks):
-            st.text(f"--- Memproses bagian audio {idx + 1} dari {len(chunks)} ---")
-            chunk_path = f"{audio_path}_chunk_{idx}.mp3"
-            chunk.export(chunk_path, format="mp3", bitrate="64k")
+        while start_time < duration_seconds:
+            end_time = min(start_time + chunk_duration, duration_seconds)
+            st.text(f"--- Memproses bagian {chunk_idx} ({start_time/60:.1f} m - {end_time/60:.1f} m) ---")
+            
+            chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
+            
+            # Ekstrak audio potongan menggunakan subclip
+            sub_clip = video_clip.subclip(start_time, end_time)
+            sub_clip.audio.write_audiofile(chunk_audio_path, bitrate="64k", logger=None)
+            sub_clip.close()
             
             # Transkripsi chunk
-            segments = transcribe_audio_file(client_groq, chunk_path)
+            segments = transcribe_audio_file(client_groq, chunk_audio_path)
             
-            # Sesuaikan timestamp dengan offset
+            # Sesuaikan timestamp dengan offset durasi
             for seg in segments:
-                seg.start += time_offset
-                seg.end += time_offset
+                seg.start += start_time
+                seg.end += start_time
                 all_segments.append(seg)
-            
-            # Update offset untuk chunk berikutnya
-            time_offset += (len(chunk) / 1000.0)
-            
-            # Hapus chunk temporary
-            if os.path.exists(chunk_path):
-                os.remove(chunk_path)
+                
+            # Hapus audio temporary chunk
+            if os.path.exists(chunk_audio_path):
+                os.remove(chunk_audio_path)
+                
+            start_time += chunk_duration
+            chunk_idx += 1
     else:
+        # Untuk video pendek, ekstrak audio langsung
+        audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
+        video_clip.audio.write_audiofile(audio_path, bitrate="64k", logger=None)
         all_segments = transcribe_audio_file(client_groq, audio_path)
+        
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+
+    video_clip.close()
 
     # 3. Penerjemahan dengan Gemini API
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
@@ -129,19 +130,15 @@ Kalimat:
     # 4. Buat File SRT Subtitle
     srt_subtitles = []
     for i, seg in enumerate(all_segments):
-        start_time = timedelta(seconds=seg.start)
-        end_time = timedelta(seconds=seg.end)
+        start_td = timedelta(seconds=seg.start)
+        end_td = timedelta(seconds=seg.end)
         text = translated_dict.get(i, seg.text.strip())
         
         srt_subtitles.append(
-            srt.Subtitle(index=i+1, start=start_time, end=end_time, content=text)
+            srt.Subtitle(index=i+1, start=start_td, end=end_td, content=text)
         )
     
     srt_output = srt.compose(srt_subtitles)
-
-    # Clean up audio temp utama
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
 
     return srt_output, all_segments, translated_dict
 
