@@ -1,10 +1,10 @@
 import streamlit as st
 import os
 import tempfile
-from moviepy import VideoFileClip
+import subprocess
+import json
 from groq import Groq
 from google import genai
-from google.genai import types
 import srt
 from datetime import timedelta
 
@@ -29,8 +29,38 @@ target_language = st.sidebar.selectbox(
 
 uploaded_file = st.file_uploader("Pilih file video (.mp4, .mov, .avi, .mkv)", type=["mp4", "mov", "avi", "mkv"])
 
+def get_video_duration(video_path):
+    """Mendapatkan durasi video (dalam detik) menggunakan ffprobe"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+def extract_audio_chunk(video_path, output_audio_path, start_sec, duration_sec):
+    """Memotong & mengekstrak audio langsung dengan FFmpeg CLI (Fast & Lightweight)"""
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(start_sec),
+        "-i", video_path,
+        "-t", str(duration_sec),
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-ab", "64k",
+        "-ac", "1",
+        "-ar", "16000",
+        output_audio_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
 def transcribe_audio_file(client_groq, audio_file_path):
-    """Fungsi helper untuk mentranskripsi satu file audio via Groq Whisper"""
+    """Mentranskripsi file audio via Groq Whisper API"""
     with open(audio_file_path, "rb") as audio_file:
         transcription = client_groq.audio.transcriptions.create(
             file=(audio_file_path, audio_file.read()),
@@ -64,9 +94,7 @@ def process_video_translation(video_path):
 
     st.info("🎵 1/3: Memisahkan & memeriksa durasi video...")
     
-    video_clip = VideoFileClip(video_path)
-    duration_seconds = video_clip.duration
-    
+    duration_seconds = get_video_duration(video_path)
     chunk_duration = 600  # 10 menit per bagian
     all_segments = []
 
@@ -75,19 +103,17 @@ def process_video_translation(video_path):
     if duration_seconds > chunk_duration:
         st.warning(f"Video berdurasi panjang ({duration_seconds/60:.1f} menit). Memproses audio dalam beberapa bagian...")
         
-        start_time = 0
+        start_time = 0.0
         chunk_idx = 1
         
         while start_time < duration_seconds:
-            end_time = min(start_time + chunk_duration, duration_seconds)
-            st.text(f"--- Memproses bagian {chunk_idx} ({start_time/60:.1f} m - {end_time/60:.1f} m) ---")
+            current_duration = min(chunk_duration, duration_seconds - start_time)
+            st.text(f"--- Memproses bagian {chunk_idx} ({start_time/60:.1f} m - {(start_time+current_duration)/60:.1f} m) ---")
             
             chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
             
-            sub_clip = video_clip.subclipped(start_time, end_time)
-            # Hapus logger=None agar tidak crash di MoviePy v2
-            sub_clip.audio.write_audiofile(chunk_audio_path, bitrate="64k")
-            sub_clip.close()
+            # Potong audio langsung pakai FFmpeg
+            extract_audio_chunk(video_path, chunk_audio_path, start_time, current_duration)
             
             segments = transcribe_audio_file(client_groq, chunk_audio_path)
             
@@ -105,14 +131,11 @@ def process_video_translation(video_path):
             chunk_idx += 1
     else:
         audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
-        # Hapus logger=None agar tidak crash di MoviePy v2
-        video_clip.audio.write_audiofile(audio_path, bitrate="64k")
+        extract_audio_chunk(video_path, audio_path, 0, duration_seconds)
         all_segments = transcribe_audio_file(client_groq, audio_path)
         
         if os.path.exists(audio_path):
             os.remove(audio_path)
-
-    video_clip.close()
 
     # 3. Penerjemahan dengan Gemini API
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
