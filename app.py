@@ -4,6 +4,7 @@ import tempfile
 import subprocess
 import json
 import time
+import re
 from groq import Groq
 from google import genai
 import srt
@@ -25,7 +26,7 @@ gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_gemini, t
 
 target_language = st.sidebar.selectbox(
     "Pilih Bahasa Target Terjemahan:",
-    ["Indonesian", "English", "Japanese", "Spanish", "French", "German", "Korean", "Mandarin"]
+    ["English", "Indonesian", "Japanese", "Spanish", "French", "German", "Korean", "Mandarin"]
 )
 
 uploaded_file = st.file_uploader("Pilih file video (.mp4, .mov, .avi, .mkv)", type=["mp4", "mov", "avi", "mkv"])
@@ -90,14 +91,18 @@ def transcribe_audio_file(client_groq, audio_file_path):
     return segments_dict_list
 
 def translate_batch(client_gemini, text_batch, target_lang):
-    """Penerjemahan per-batch dengan penanganan retry"""
-    prompt = f"""Kamu adalah penerjemah profesional. Terjemahkan kalimat-kalimat berikut ke dalam bahasa {target_lang}.
-Sangat penting: Jaga format penomoran [x] di awal setiap baris agar persis sama dengan aslinya! Jangan tambahkan penjelasan lain.
+    """Penerjemahan per-batch dengan instruksi super ketat"""
+    prompt = f"""You are a professional translator. 
+Translate the following lines into {target_lang}.
 
-Kalimat:
+RULES:
+1. Keep the exact index prefix [x] at the beginning of each translated line.
+2. Translate ONLY the text after [x].
+3. Do NOT skip any lines, do NOT summarize, and do NOT add extra comments.
+
+Input:
 {text_batch}
 """
-    # Mencoba model gemini-2.5-flash terlebih dahulu, lalu gemini-1.5-flash jika bermasalah
     models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash']
     
     for model_name in models_to_try:
@@ -169,11 +174,11 @@ def process_video_translation(video_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-    # 3. Penerjemahan dengan Gemini API (Bertahap / Batching)
+    # 3. Penerjemahan dengan Gemini API (Bertahap)
     st.info(f"🌐 3/3: Menerjemahkan ke bahasa {target_language}...")
     
     translated_dict = {}
-    batch_size = 50  # Menerjemahkan 50 baris per request
+    batch_size = 80  # Menerjemahkan 80 baris per request
     
     total_segments = len(all_segments)
     progress_bar = st.progress(0)
@@ -186,27 +191,32 @@ def process_video_translation(video_path):
         
         translated_raw = translate_batch(client_gemini, text_batch, target_language)
         
-        # Parsing hasil terjemahan batch
+        # Robust Parsing menggunakan Regular Expressions
         translated_lines = translated_raw.strip().split("\n")
         for line in translated_lines:
-            if line.startswith("[") and "]" in line:
+            line = line.strip()
+            # Cocokkan angka di dalam kurung siku [0] atau format penomoran serupa
+            match = re.match(r"^\[?(\d+)\]?[\.\:\-]?\s*(.*)", line)
+            if match:
                 try:
-                    idx_str, text = line.split("]", 1)
-                    idx = int(idx_str.replace("[", "").strip())
-                    clean_text = text.strip().lstrip(". ").strip()
-                    translated_dict[idx] = clean_text
+                    idx = int(match.group(1))
+                    text = match.group(2).strip()
+                    if text:  # Jika ada isi terjemahan
+                        translated_dict[idx] = text
                 except:
                     continue
         
         progress = min(1.0, end_idx / total_segments)
         progress_bar.progress(progress)
-        time.sleep(0.5)  # Jeda aman antar batch
+        time.sleep(0.5)
 
     # 4. Buat File SRT Subtitle
     srt_subtitles = []
     for i, seg in enumerate(all_segments):
         start_td = timedelta(seconds=seg["start"])
         end_td = timedelta(seconds=seg["end"])
+        
+        # Prioritaskan hasil terjemahan dari dict
         text = translated_dict.get(i, seg["text"].strip())
         
         srt_subtitles.append(
