@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import tempfile
-from moviepy.editor import VideoFileClip
+from moviepy import VideoFileClip
 from groq import Groq
 from google import genai
 from google.genai import types
