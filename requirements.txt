@@ -1,1 +1,5 @@
-
+streamlit
+groq
+google-genai
+moviepy
+srt
