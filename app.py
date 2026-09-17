@@ -66,8 +66,8 @@ def process_video_translation(video_path):
             
             chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
             
-            # Ekstrak audio potongan menggunakan subclip
-            sub_clip = video_clip.subclip(start_time, end_time)
+            # Ekstrak audio potongan menggunakan subclipped() [MoviePy v2+]
+            sub_clip = video_clip.subclipped(start_time, end_time)
             sub_clip.audio.write_audiofile(chunk_audio_path, bitrate="64k", logger=None)
             sub_clip.close()
             
