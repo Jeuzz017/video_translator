@@ -1,13 +1,44 @@
+import streamlit as st
+import os
+import tempfile
+from moviepy import VideoFileClip
+from groq import Groq
+from google import genai
+from google.genai import types
+import srt
+from datetime import timedelta
+
+st.set_page_config(page_title="Video Translator AI", layout="wide", page_icon="🎬")
+
+st.title("🎬 Video Speech Translator App")
+st.caption("Unggah video, transkrip percakapan, dan terjemahkan secara otomatis!")
+
+# Sidebar Config
+st.sidebar.header("🔑 API Configurations")
+
+# Membaca dari Streamlit Secrets jika ada, jika tidak ada baru membaca dari sidebar
+default_groq = st.secrets.get("GROQ_API_KEY", "")
+default_gemini = st.secrets.get("GEMINI_API_KEY", "")
+
+groq_api_key = st.sidebar.text_input("Groq API Key", value=default_groq, type="password", help="Dapatkan gratis di console.groq.com")
+gemini_api_key = st.sidebar.text_input("Gemini API Key", value=default_gemini, type="password", help="Dapatkan gratis di aistudio.google.com")
+
+target_language = st.sidebar.selectbox(
+    "Pilih Bahasa Target Terjemahan:",
+    ["Indonesian", "English", "Japanese", "Spanish", "French", "German", "Korean", "Mandarin"]
+)
+
+uploaded_file = st.file_uploader("Pilih file video (.mp4, .mov, .avi, .mkv)", type=["mp4", "mov", "avi", "mkv"])
+
 def process_video_translation(video_path):
     client_groq = Groq(api_key=groq_api_key)
     client_gemini = genai.Client(api_key=gemini_api_key)
 
-    # 1. Ekstraksi & Kompresi Audio
+    # 1. Ekstraksi & Kompresi Audio (bitrate 64k agar file < 25 MB)
     st.info("🎵 1/3: Memisahkan & mengompres audio dari video...")
     audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
     
     clip = VideoFileClip(video_path)
-    # Menggunakan bitrate 64k agar ukuran file sangat kecil (<25MB)
     clip.audio.write_audiofile(
         audio_path, 
         bitrate="64k", 
@@ -79,3 +110,49 @@ Kalimat:
         os.remove(audio_path)
 
     return srt_output, segments, translated_dict
+
+if uploaded_file is not None:
+    # Simpan sementara video yang diupload
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        temp_video_path = tmp_file.name
+
+    st.video(uploaded_file)
+
+    if st.button("🚀 Mulai Terjemahkan Video", type="primary"):
+        if not groq_api_key or not gemini_api_key:
+            st.error("Silakan masukkan Groq API Key dan Gemini API Key terlebih dahulu!")
+        else:
+            with st.spinner("Sedang memproses... Harap tunggu sebentar."):
+                try:
+                    srt_content, original_segments, translated_dict = process_video_translation(temp_video_path)
+                    st.success("✅ Proses Terjemahan Selesai!")
+
+                    # Kolom Download & Preview
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("📥 Download Subtitle (.srt)")
+                        st.download_button(
+                            label="Download File .SRT",
+                            data=srt_content,
+                            file_name=f"translated_{target_language}.srt",
+                            mime="text/plain"
+                        )
+                    
+                    with col2:
+                        st.subheader("📜 Hasil Transkrip & Terjemahan")
+                        for i, seg in enumerate(original_segments):
+                            orig = seg.text.strip()
+                            trans = translated_dict.get(i, "-")
+                            st.markdown(f"**[{seg.start:.1f}s - {seg.end:.1f}s]**")
+                            st.markdown(f"- 🗣️ *Original:* {orig}")
+                            st.markdown(f"- 🌐 *Terjemahan:* {trans}")
+                            st.divider()
+
+                except Exception as e:
+                    st.error(f"Terjadi kesalahan: {str(e)}")
+            
+            # Hapus file temporary video
+            if os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
