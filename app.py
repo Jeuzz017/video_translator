@@ -37,7 +37,7 @@ def transcribe_audio_file(client_groq, audio_file_path):
             model="whisper-large-v3",
             response_format="verbose_json"
         )
-    # Jika response berupa objek pydantic/dataclass, ubah ke dict agar konsisten
+    
     if hasattr(transcription, "segments"):
         raw_segments = transcription.segments
     elif isinstance(transcription, dict):
@@ -45,7 +45,6 @@ def transcribe_audio_file(client_groq, audio_file_path):
     else:
         raw_segments = getattr(transcription, "segments", [])
 
-    # Konversi setiap segmen ke dictionary murni
     segments_dict_list = []
     for s in raw_segments:
         if isinstance(s, dict):
@@ -86,12 +85,12 @@ def process_video_translation(video_path):
             chunk_audio_path = video_path.replace(os.path.splitext(video_path)[1], f"_chunk_{chunk_idx}.mp3")
             
             sub_clip = video_clip.subclipped(start_time, end_time)
-            sub_clip.audio.write_audiofile(chunk_audio_path, bitrate="64k", logger=None)
+            # Hapus logger=None agar tidak crash di MoviePy v2
+            sub_clip.audio.write_audiofile(chunk_audio_path, bitrate="64k")
             sub_clip.close()
             
             segments = transcribe_audio_file(client_groq, chunk_audio_path)
             
-            # Sesuaikan timestamp dengan offset durasi
             for seg in segments:
                 all_segments.append({
                     "start": seg["start"] + start_time,
@@ -106,7 +105,8 @@ def process_video_translation(video_path):
             chunk_idx += 1
     else:
         audio_path = video_path.replace(os.path.splitext(video_path)[1], ".mp3")
-        video_clip.audio.write_audiofile(audio_path, bitrate="64k", logger=None)
+        # Hapus logger=None agar tidak crash di MoviePy v2
+        video_clip.audio.write_audiofile(audio_path, bitrate="64k")
         all_segments = transcribe_audio_file(client_groq, audio_path)
         
         if os.path.exists(audio_path):
